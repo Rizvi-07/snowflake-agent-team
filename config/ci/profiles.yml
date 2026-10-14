@@ -12,5 +12,5 @@ agent_platform:
       role: "{{ env_var('SNOWFLAKE_ROLE') }}"
       database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
       warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
-      schema: SILVER
+      schema: "{{ env_var('DBT_TARGET_SCHEMA', 'SILVER') }}"
       threads: 2
