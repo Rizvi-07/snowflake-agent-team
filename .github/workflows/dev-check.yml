@@ -1,0 +1,81 @@
+name: Snowflake Dev connection and tests
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snowflake-dev-check
+  cancel-in-progress: false
+
+jobs:
+  check-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: development
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dbt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "dbt-core==1.12.5" "dbt-snowflake==1.12.2"
+
+      - name: Validate Dev settings and prepare private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          expected = {
+              "SNOWFLAKE_USER": "AGENT_DEV_CI",
+              "SNOWFLAKE_ROLE": "AGENT_DEV_ROLE",
+              "SNOWFLAKE_DATABASE": "AGENTWAREHOUSEDEV",
+              "SNOWFLAKE_WAREHOUSE": "DEV_COMPUTE_WH",
+          }
+
+          for name, value in expected.items():
+              if os.environ.get(name, "").upper() != value:
+                  raise SystemExit(f"Check the development secret: {name}")
+
+          key = os.environ.get("SNOWFLAKE_PRIVATE_KEY", "")
+          if not key.strip():
+              raise SystemExit("SNOWFLAKE_PRIVATE_KEY is missing")
+
+          key_path = Path(os.environ["RUNNER_TEMP"]) / "snowflake-dev-key.p8"
+          key_path.write_text(key, encoding="utf-8")
+          key_path.chmod(0o600)
+          PY
+
+      - name: Test Snowflake Dev connection
+        run: dbt debug --project-dir dbt --profiles-dir config/ci --target dev
+
+      - name: Build connection check and run tests
+        run: dbt build --project-dir dbt --profiles-dir config/ci --target dev --select connection_check
+
+      - name: Remove temporary private key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/snowflake-dev-key.p8"
