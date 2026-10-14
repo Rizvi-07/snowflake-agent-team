@@ -143,3 +143,28 @@ jobs:
       - name: Remove temporary private key
         if: always()
         run: rm -f "$RUNNER_TEMP/snowflake-dev-key.p8"
+
+  require-pr-validation:
+    name: PR Dev validation required
+    needs: pr-dev
+    if: ${{ always() && github.event.action != 'closed' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - name: Require successful database validation
+        env:
+          VALIDATION_RESULT: ${{ needs.pr-dev.result }}
+          PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          if [ "$PR_HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
+            echo "Fork PRs require a separate validation process."
+            exit 1
+          fi
+
+          if [ "$VALIDATION_RESULT" != "success" ]; then
+            echo "Database validation did not succeed: $VALIDATION_RESULT"
+            exit 1
+          fi
+
+          echo "Snowflake PR validation passed."
