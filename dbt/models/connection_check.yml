@@ -1,0 +1,11 @@
+version: 2
+
+models:
+  - name: connection_check
+    description: "Checks model creation and testing in Snowflake Dev."
+
+    columns:
+      - name: check_id
+        data_tests:
+          - not_null
+          - unique
