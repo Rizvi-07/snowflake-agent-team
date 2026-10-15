@@ -14,10 +14,10 @@ concurrency:
 
 jobs:
   deploy-prod:
-    name: Deploy connection check to Prod
+    name: Deploy products and connection check to Prod
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment: production
 
     env:
@@ -27,6 +27,7 @@ jobs:
       SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
       SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
       DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+      SNOWFLAKE_QUERY_TAG: agent_platform:${{ github.repository }}:prod:run:${{ github.run_id }}:${{ github.run_attempt }}
 
     steps:
       - name: Check out released code
@@ -39,10 +40,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dbt
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "dbt-core==1.12.5" "dbt-snowflake==1.12.2"
+      - name: Install pinned pipeline dependencies
+        run: python -m pip install -r requirements.txt
 
       - name: Validate Prod settings and prepare private key
         env:
@@ -87,6 +86,9 @@ jobs:
       - name: Build and test production connection check
         run: |
           dbt build --project-dir dbt --profiles-dir config/ci --target prod --select connection_check
+
+      - name: Ingest, build and test production products
+        run: python scripts/run_data_flow.py --target prod --profiles-dir config/ci --apply
 
       - name: Remove temporary private key
         if: always()

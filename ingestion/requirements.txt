@@ -1,0 +1,2 @@
+# Keep the existing installation command while sharing one runtime version list.
+-r ../requirements.txt

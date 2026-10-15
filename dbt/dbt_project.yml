@@ -34,3 +34,16 @@ models:
     # Config indicated by + and applies to all files under models/example/
     example:
       +materialized: view
+    products:
+      +tags: [products]
+      silver:
+        +schema: SILVER
+        +materialized: view
+      gold:
+        +schema: GOLD
+        +materialized: table
+
+data_tests:
+  agent_platform:
+    products:
+      +tags: [products]
