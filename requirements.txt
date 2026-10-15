@@ -1,0 +1,7 @@
+# Direct runtime dependencies, pinned to the existing verified environment.
+dbt-core==1.12.5
+dbt-snowflake==1.12.2
+dbt-common==1.39.0
+snowflake-connector-python==4.8.0
+cryptography==50.0.2
+PyYAML==6.0.3

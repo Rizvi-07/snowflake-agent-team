@@ -15,7 +15,7 @@ concurrency:
 jobs:
   check-dev:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment: development
 
     env:
@@ -25,6 +25,8 @@ jobs:
       SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
       SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
       DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+      DBT_TARGET_SCHEMA: SILVER
+      SNOWFLAKE_QUERY_TAG: agent_platform:${{ github.repository }}:dev:run:${{ github.run_id }}:${{ github.run_attempt }}
 
     steps:
       - name: Check out repository
@@ -37,10 +39,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dbt
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "dbt-core==1.12.5" "dbt-snowflake==1.12.2"
+      - name: Install pinned pipeline dependencies
+        run: python -m pip install -r requirements.txt
 
       - name: Validate Dev settings and prepare private key
         env:
@@ -75,6 +75,9 @@ jobs:
 
       - name: Build connection check and run tests
         run: dbt build --project-dir dbt --profiles-dir config/ci --target dev --select connection_check
+
+      - name: Ingest, build and test shared Dev products
+        run: python scripts/run_data_flow.py --target dev --profiles-dir config/ci --apply
 
       - name: Remove temporary private key
         if: always()
