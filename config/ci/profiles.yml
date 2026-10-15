@@ -14,6 +14,7 @@ agent_platform:
       warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
       schema: "{{ env_var('DBT_TARGET_SCHEMA', 'SILVER') }}"
       threads: 2
+      query_tag: "{{ env_var('SNOWFLAKE_QUERY_TAG', 'agent_platform:ci:dev') }}"
 
     prod:
       type: snowflake
@@ -27,3 +28,4 @@ agent_platform:
       warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
       schema: SILVER
       threads: 2
+      query_tag: "{{ env_var('SNOWFLAKE_QUERY_TAG', 'agent_platform:ci:prod') }}"

@@ -7,17 +7,21 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+  actions: read
 
 concurrency:
   group: snowflake-pr-dev-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+  # Keep close/reopen events instead of replacing the single pending run.
+  queue: max
 
 jobs:
   pr-dev:
     name: PR Dev validation and cleanup
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     environment: development
 
     env:
@@ -36,15 +40,21 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Check out closed PR code for cleanup
+        if: github.event.action == 'closed'
+        uses: actions/checkout@v7
+        with:
+          # Rejected/deleted branches may no longer have a merge ref.
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
-      - name: Install dbt
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install "dbt-core==1.12.5" "dbt-snowflake==1.12.2"
+      - name: Install pinned pipeline dependencies
+        run: python -m pip install -r requirements.txt
 
       - name: Validate Dev settings and prepare private key
         env:
@@ -84,61 +94,10 @@ jobs:
           key_path.chmod(0o600)
           PY
 
-      - name: Check Snowflake Dev connection
-        if: github.event.action != 'closed'
-        run: |
-          dbt debug --project-dir dbt --profiles-dir config/ci --target dev
-
-      - name: Build and test in the PR schema
-        if: github.event.action != 'closed'
-        run: |
-          dbt build --project-dir dbt --profiles-dir config/ci --target dev --select connection_check
-
-      - name: Remove the closed PR's temporary schema
-        if: github.event.action == 'closed'
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-          import snowflake.connector
-
-          schema = os.environ["DBT_TARGET_SCHEMA"]
-          if not re.fullmatch(r"PR_[1-9][0-9]*_SILVER", schema):
-              raise SystemExit("Refusing cleanup: invalid schema")
-
-          database = os.environ["SNOWFLAKE_DATABASE"].upper()
-          if database != "AGENTWAREHOUSEDEV":
-              raise SystemExit("Refusing cleanup outside Dev")
-
-          key_path = (
-              Path(os.environ["RUNNER_TEMP"])
-              / "snowflake-dev-key.p8"
-          )
-
-          connection = snowflake.connector.connect(
-              account=os.environ["SNOWFLAKE_ACCOUNT"],
-              user=os.environ["SNOWFLAKE_USER"],
-              role=os.environ["SNOWFLAKE_ROLE"],
-              warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
-              database=database,
-              authenticator="SNOWFLAKE_JWT",
-              private_key_file=str(key_path),
-              private_key_file_pwd=os.environ[
-                  "DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE"
-              ],
-          )
-
-          try:
-              with connection.cursor() as cursor:
-                  cursor.execute(
-                      f'DROP SCHEMA IF EXISTS '
-                      f'"{database}"."{schema}" CASCADE'
-                  )
-              print(f"Removed temporary schema: {database}.{schema}")
-          finally:
-              connection.close()
-          PY
+      - name: Validate products and connection check, or drain and clean closed PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/ci_pr_lifecycle.py
 
       - name: Remove temporary private key
         if: always()

@@ -1,0 +1,21 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: Raw product snapshots loaded by ingestion/ingest_products.py.
+    database: "{{ target.database }}"
+    # Source properties cannot call project macros. Mirror products_schema's
+    # BRONZE routing here; the offline manifest checks assert they stay aligned.
+    schema: "{{ (target.schema | trim | upper | replace('_SILVER', '_BRONZE')) if (target.schema | trim | upper).startswith('PR_') else 'BRONZE' }}"
+    config:
+      tags: [products]
+    tables:
+      - name: products
+        identifier: PRODUCTS
+        columns:
+          - name: source_filename
+            data_tests: [not_null]
+          - name: batch_id
+            data_tests: [not_null]
+          - name: ingested_at
+            data_tests: [not_null]

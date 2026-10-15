@@ -1,0 +1,53 @@
+version: 2
+
+models:
+  - name: stg_products
+    description: >-
+      All Bronze products with integer IDs, NUMBER(18,2) prices, trimmed names
+      and title-case categories. Invalid IDs/prices become null, never removed.
+      Fractional IDs are rejected rather than rounded to a different product.
+      Prices allow at most two fractional digits; fractional cents and exponent
+      notation become null rather than being silently rounded or coerced.
+    columns:
+      - name: product_id
+        data_tests: [not_null, unique]
+      - name: product_name
+        data_tests: [not_null, not_blank]
+      - name: category
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [Electronics, Furniture]
+      - name: price
+        data_tests: [not_null, nonnegative]
+      - name: source_filename
+        data_tests: [not_null, not_blank]
+      - name: batch_id
+        data_tests: [not_null, not_blank]
+      - name: ingested_at
+        data_tests: [not_null]
+
+  - name: product_category_summary
+    description: >-
+      One row per category. Counts include all Silver rows; prices are fixed-point
+      and averages are represented to six decimal places. Reconciliation tests
+      compare every aggregate with Silver, including missing/extra categories.
+    columns:
+      - name: category
+        data_tests:
+          - not_null
+          - unique
+          - accepted_values:
+              arguments:
+                values: [Electronics, Furniture]
+      - name: product_count
+        data_tests: [not_null, nonnegative]
+      - name: total_price
+        data_tests: [not_null, nonnegative]
+      - name: average_price
+        data_tests: [not_null, nonnegative]
+      - name: minimum_price
+        data_tests: [not_null, nonnegative]
+      - name: maximum_price
+        data_tests: [not_null, nonnegative]
