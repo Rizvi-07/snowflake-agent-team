@@ -2,7 +2,7 @@ name: Snowflake PR Dev lifecycle
 
 on:
   pull_request:
-    branches: [dev]
+    branches: [dev, main]
     types: [opened, synchronize, reopened, closed]
 
 permissions:
@@ -152,13 +152,20 @@ jobs:
     timeout-minutes: 2
 
     steps:
-      - name: Require successful database validation
+      - name: Require successful validation and correct release branch
         env:
           VALIDATION_RESULT: ${{ needs.pr-dev.result }}
           PR_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_BASE_BRANCH: ${{ github.base_ref }}
+          PR_HEAD_BRANCH: ${{ github.head_ref }}
         run: |
           if [ "$PR_HEAD_REPOSITORY" != "$GITHUB_REPOSITORY" ]; then
             echo "Fork PRs require a separate validation process."
+            exit 1
+          fi
+
+          if [ "$PR_BASE_BRANCH" = "main" ] && [ "$PR_HEAD_BRANCH" != "dev" ]; then
+            echo "Pull requests into main must come from dev."
             exit 1
           fi
 
@@ -167,4 +174,4 @@ jobs:
             exit 1
           fi
 
-          echo "Snowflake PR validation passed."
+          echo "Validation and branch checks passed."
