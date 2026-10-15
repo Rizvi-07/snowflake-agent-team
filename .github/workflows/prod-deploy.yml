@@ -1,0 +1,93 @@
+name: Snowflake production deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: snowflake-production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy-prod:
+    name: Deploy connection check to Prod
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.SNOWFLAKE_USER }}
+      SNOWFLAKE_ROLE: ${{ secrets.SNOWFLAKE_ROLE }}
+      SNOWFLAKE_DATABASE: ${{ secrets.SNOWFLAKE_DATABASE }}
+      SNOWFLAKE_WAREHOUSE: ${{ secrets.SNOWFLAKE_WAREHOUSE }}
+      DBT_ENV_SECRET_SNOWFLAKE_KEY_PASSPHRASE: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PASSPHRASE }}
+
+    steps:
+      - name: Check out released code
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dbt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "dbt-core==1.12.5" "dbt-snowflake==1.12.2"
+
+      - name: Validate Prod settings and prepare private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.SNOWFLAKE_PRIVATE_KEY }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+
+          expected = {
+              "SNOWFLAKE_USER": "AGENT_PROD_CI",
+              "SNOWFLAKE_ROLE": "AGENT_PROD_ROLE",
+              "SNOWFLAKE_DATABASE": "AGENTWAREHOUSEPROD",
+              "SNOWFLAKE_WAREHOUSE": "PROD_COMPUTE_WH",
+          }
+
+          for name, value in expected.items():
+              if os.environ.get(name, "").upper() != value:
+                  raise SystemExit(
+                      f"Check the production secret: {name}"
+                  )
+
+          if not os.environ.get("SNOWFLAKE_ACCOUNT", "").strip():
+              raise SystemExit("SNOWFLAKE_ACCOUNT is missing")
+
+          key = os.environ.get("SNOWFLAKE_PRIVATE_KEY", "")
+          if not key.strip():
+              raise SystemExit("SNOWFLAKE_PRIVATE_KEY is missing")
+
+          key_path = (
+              Path(os.environ["RUNNER_TEMP"])
+              / "snowflake-prod-key.p8"
+          )
+          key_path.write_text(key, encoding="utf-8")
+          key_path.chmod(0o600)
+          PY
+
+      - name: Check Snowflake Prod connection
+        run: |
+          dbt debug --project-dir dbt --profiles-dir config/ci --target prod
+
+      - name: Build and test production connection check
+        run: |
+          dbt build --project-dir dbt --profiles-dir config/ci --target prod --select connection_check
+
+      - name: Remove temporary private key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/snowflake-prod-key.p8"
