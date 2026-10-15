@@ -1,0 +1,19 @@
+# Python
+.venv/
+__pycache__/
+.pytest_cache/
+
+# Local configuration and credentials
+config/local/
+.env
+.env.*
+!.env.example
+*.p8
+*.pem
+
+# Generated dbt files
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+
+/logs/
