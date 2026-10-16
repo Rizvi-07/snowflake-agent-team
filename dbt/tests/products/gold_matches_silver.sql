@@ -1,6 +1,6 @@
 {{ config(tags=['products']) }}
 
-with expected as (
+with silver as (
     select
         category,
         count(*) as product_count,
@@ -10,6 +10,11 @@ with expected as (
         max(price) as maximum_price
     from {{ ref('stg_products') }}
     group by category
+), expected as (
+    select
+        *,
+        sum(total_price) over () as overall_total_price
+    from silver
 ), actual as (
     select * from {{ ref('product_category_summary') }}
 )
@@ -27,3 +32,12 @@ where expected.product_count is distinct from actual.product_count
     or expected.average_price is distinct from actual.average_price
     or expected.minimum_price is distinct from actual.minimum_price
     or expected.maximum_price is distinct from actual.maximum_price
+    -- Without dividing or rounding: a two-decimal share p is the half-up
+    -- rounding of total * 100 / overall exactly when
+    -- (p - 0.005) * overall <= total * 100 < (p + 0.005) * overall.
+    or actual.price_share_pct is null
+    or (expected.overall_total_price = 0 and actual.price_share_pct <> 0)
+    or (expected.overall_total_price <> 0 and not (
+        (actual.price_share_pct - 0.005) * expected.overall_total_price <= expected.total_price * 100
+        and expected.total_price * 100 < (actual.price_share_pct + 0.005) * expected.overall_total_price
+    ))
