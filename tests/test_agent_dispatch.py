@@ -228,6 +228,32 @@ class AgentTests(unittest.TestCase):
                      "dbt/models/connection_check.sql", "../app/a.py", "/app/a.py", "app//a.py", "app/./a.py", "app/a\nb.py"):
             self.assertFalse(agent.allowed_path(name), name)
 
+    def test_path_policy_reports_specific_reasons_without_expanding_scope(self):
+        cases = {
+            '': 'empty paths', 'docs/' + 'x' * 240: '240-character limit',
+            'docs/bad name.md': 'ASCII path alphabet', '/app/a.py': 'absolute paths',
+            'app//a.py': 'canonical repository-relative', '../app/a.py': 'path traversal',
+            '.github/workflows/new.yml': 'GitHub workflows and repository controls',
+            'app/.hidden/a.py': 'hidden path components', 'docs/CLAUDE.local.md': 'agent instruction files',
+            'scripts/agents/new.py': 'agent controller files', 'docs/agents/setup.md': 'agent guidance and setup',
+            'src/auth.py': 'authentication, permission and deployment', 'scripts/DEPLOYMENT.py': 'authentication, permission and deployment',
+            'docs/new.py': 'documentation permits only', 'dbt/models/new.py': 'dbt models and tests permit only',
+            'dbt/tests/new.csv': 'dbt models and tests permit only', 'sample_data/new.py': 'sample data permits only',
+            'app/new.sql': 'application and test directories permit only', 'config/ci/profiles.yml': 'outside the initial agent publication allowlist',
+        }
+        for name in agent.PROTECTED:
+            cases[name] = 'explicitly protected pipeline or agent control file'
+        for name, reason in cases.items():
+            with self.subTest(path=name):
+                self.assertFalse(agent.allowed_path(name))
+                self.assertIn(reason, agent.path_rejection_reason(name))
+                with self.assertRaises(agent.AgentError):
+                    agent.validate_payload(self.payload(name))
+        for name in ('README.md', 'docs/new.rst', 'docs/new.txt', 'sample_data/new.json',
+                     'dbt/tests/new.yaml', 'dbt/models/new.yml', 'app/author.py'):
+            self.assertTrue(agent.allowed_path(name), name)
+            self.assertIsNone(agent.path_rejection_reason(name))
+
     def test_payload_rejects_protected_duplicate_binary_secret_and_missing_verification(self):
         invalid = [self.payload("AGENTS.md"), self.payload(text="private\x00data"), self.payload(text="sk-ant-example")]
         duplicate = self.payload(); duplicate["files"] *= 2; invalid.append(duplicate)
@@ -422,6 +448,97 @@ class AgentTests(unittest.TestCase):
                 agent.collect(plan, Path('output/must-not-exist.json'))
             with patch.object(agent, 'git', side_effect=[b'app/products.py\0', b'']), patch.object(Path, 'is_symlink', return_value=True), self.assertRaises(agent.AgentError):
                 agent.collect(plan, Path('output/must-not-exist.json'))
+
+    def test_collect_main_reports_every_blocked_path_without_reading_or_logging_contents(self):
+        plan = agent.make_plan(self.api)
+        tracked = b'README.md\0scripts/run_data_flow.py\0'
+        untracked = b'docs/agents/new.md\0scripts/run_data_flow.py\0.agent-task/private.json\0.agent-control/private.py\0.claude/private.json\0'
+        with self.cwd(), patch.dict(os.environ, {
+            'CLAUDE_CONCLUSION': 'success', 'AGENT_PLAN': json.dumps(plan),
+            'AGENT_PAYLOAD': 'output/payload.json', 'ANTHROPIC_API_KEY': 'environment-value-must-not-be-logged',
+        }), patch.object(agent.sys, 'argv', ['issue_dispatch.py', 'collect']), \
+                patch.object(agent, 'git', side_effect=[tracked, untracked]), \
+                patch.object(Path, 'read_bytes') as contents, patch.object(Path, 'read_text') as reports, \
+                patch.object(agent.subprocess, 'run') as checks, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(agent.main(), 1)
+            self.assertEqual(errors.getvalue().splitlines(), [
+                'ERROR: Claude changed protected or invalid paths; no artifact or PR will be published.',
+                '  "docs/agents/new.md": agent guidance and setup documentation require human maintenance',
+                '  "scripts/run_data_flow.py": explicitly protected pipeline or agent control file requires human maintenance',
+            ])
+            self.assertEqual(self.output.getvalue(), '')
+            contents.assert_not_called()
+            reports.assert_not_called()
+            checks.assert_not_called()
+            self.assertFalse(Path('output/payload.json').exists())
+            self.assertEqual(self.api.writes, [])
+
+    def test_collect_escapes_control_unicode_and_shell_like_filename_characters(self):
+        paths = ['docs/quote"and\\slash.md', 'docs/new\n::error::fake\r\t\x1b.md',
+                 'docs/$(echo injected);`command`%0A.md', 'docs/bidi-\u202e-emoji-\U0001f600.md']
+        plan = agent.make_plan(self.api)
+        data = ('\0'.join(paths) + '\0').encode('utf-8')
+        with self.cwd(), patch.dict(os.environ, {'CLAUDE_CONCLUSION': 'success'}), \
+                patch.object(agent, 'git', side_effect=[data, b'']), \
+                patch.object(Path, 'read_bytes') as contents, patch.object(agent.subprocess, 'run') as checks:
+            with self.assertRaises(agent.AgentError) as error:
+                agent.collect(plan, Path('output/payload.json'))
+            lines = str(error.exception).splitlines()[1:]
+            self.assertEqual(len(lines), len(paths))
+            decoded = []
+            for line in lines:
+                literal, reason = line.strip().split(': ', 1)
+                decoded.append(json.loads(literal))
+                self.assertIn('ASCII path alphabet', reason)
+                self.assertTrue(line.isascii())
+                self.assertFalse(any(ord(character) < 32 for character in line))
+                for unsafe in ('::error::', '$(', '`', '%0A'):
+                    self.assertNotIn(unsafe, line)
+            self.assertEqual(decoded, sorted(paths))
+            contents.assert_not_called()
+            checks.assert_not_called()
+            self.assertFalse(Path('output/payload.json').exists())
+
+    def test_collect_identifies_undecodable_git_filename_without_decode_failure(self):
+        plan = agent.make_plan(self.api)
+        with self.cwd(), patch.dict(os.environ, {'CLAUDE_CONCLUSION': 'success'}), \
+                patch.object(agent, 'git', side_effect=[b'docs/bad-\xff.md\0', b'']):
+            with self.assertRaises(agent.AgentError) as error:
+                agent.collect(plan, Path('output/payload.json'))
+            self.assertIn('"docs/bad-\\udcff.md": path contains characters outside the permitted ASCII path alphabet', str(error.exception))
+            self.assertTrue(str(error.exception).isascii())
+            self.assertFalse(Path('output/payload.json').exists())
+
+    def test_collect_withholds_credential_like_filenames(self):
+        plan = agent.make_plan(self.api)
+        candidates = ['sk-' + 'proj-' + 'x' * 64, 'sk-' + 'ant-api03-' + 'x' * 64,
+                      'gh' + 's_' + 'x' * 40, 'github_' + 'pat_' + 'x' * 64,
+                      'sk-' + 'ant-short', '-----BEGIN ' + 'PRIVATE KEY-----']
+        for value in candidates:
+            with self.subTest(credential_format=candidates.index(value)), self.cwd(), \
+                    patch.dict(os.environ, {'CLAUDE_CONCLUSION': 'success'}), \
+                    patch.object(agent, 'git', side_effect=[('.github/' + value + '.yml\0').encode(), b'']):
+                with self.assertRaises(agent.AgentError) as error:
+                    agent.collect(plan, Path('output/payload.json'))
+                self.assertIn('"[REDACTED credential-like filename]": ', str(error.exception))
+                self.assertNotIn(value, str(error.exception))
+                self.assertFalse(Path('output/payload.json').exists())
+
+    def test_collect_identifies_all_symlink_and_directory_rejections(self):
+        plan = agent.make_plan(self.api)
+        with self.cwd(), patch.dict(os.environ, {'CLAUDE_CONCLUSION': 'success'}):
+            Path('app/folder.py').mkdir(parents=True)
+            with patch.object(agent, 'git', side_effect=[b'app/link/a.py\0app/folder.py\0', b'']), \
+                    patch.object(Path, 'is_symlink', lambda path: path.as_posix() == 'app/link'), \
+                    patch.object(Path, 'read_bytes') as contents:
+                with self.assertRaises(agent.AgentError) as error:
+                    agent.collect(plan, Path('output/payload.json'))
+                self.assertEqual(str(error.exception).splitlines()[1:], [
+                    '  "app/folder.py": symlinks and directories cannot be published as files',
+                    '  "app/link/a.py": symlinks and directories cannot be published as files',
+                ])
+                contents.assert_not_called()
+                self.assertFalse(Path('output/payload.json').exists())
 
     def test_prepare_retries_apply_owned_changes_to_dev_and_stop_on_conflicts(self):
         self.api.existing()
