@@ -1,0 +1,13 @@
+# Trusted base only; a fresh CODEX_HOME outside the checkout is created each run.
+approval_policy = "never"
+web_search = "disabled"
+
+[features]
+shell_tool = false
+shell_snapshot = false
+apps = false
+goals = false
+skill_mcp_dependency_install = false
+
+[history]
+persistence = "none"

@@ -4,6 +4,25 @@ An AI-assisted data engineering project using Claude as a developer and Codex as
 See [the reviewed products pipeline guide](docs/products_pipeline.md) for the
 data contract, operating commands, verified results and recovery limits.
 
+## GitHub Issues and AI agents
+
+The [agent setup guide](docs/agents/README.md) defines GitHub Issues → Claude
+developer → Codex reviewer → human merge. Repository instructions live in
+[AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md) and `docs/agents/`.
+Follow the [owner setup and bootstrap runbook](docs/agents/setup.md) for App/API
+configuration, enablement, shutdown and the documentation-only smoke-test issue.
+The [development task form](.github/ISSUE_TEMPLATE/development-task.yml) captures
+goal, scope, acceptance criteria and verification without applying `ai`.
+The [Claude issue workflow](docs/agents/claude-developer.md) is implemented but
+disabled unless `ENABLE_CLAUDE_AGENT` equals `true`. Owner App/API setup and
+verification are required before enabling it.
+The [advisory Codex reviewer](docs/agents/codex-reviewer.md) is implemented but
+disabled unless `ENABLE_CODEX_REVIEW` equals `true`. It reviews trusted
+same-repository PR events, using a read-only model job and a separate validated
+comment publisher. Owner API/App-identity setup and live verification remain.
+Agent jobs receive no Snowflake credentials. Existing CI owns database checks
+and deployment, and human-reviewed merges into `dev` and `main` remain required.
+
 ## Run the products pipeline
 
 Use `scripts/run_data_flow.py` as the entry point for CSV → Python Bronze → dbt

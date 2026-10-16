@@ -17,3 +17,8 @@ dbt/logs/
 dbt/dbt_packages/
 
 /logs/
+
+# Agent task snapshots, trusted controller checkout, and local Claude runtime
+/.agent-task/
+/.agent-control/
+/.claude/
