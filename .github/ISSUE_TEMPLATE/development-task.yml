@@ -1,0 +1,59 @@
+name: Development task
+description: Define a scoped implementation task and how to verify it.
+title: "[Task]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the task without credentials, private keys, customer data or secret-bearing logs.
+        A maintainer may apply `ai` after triage. This form does not apply that label.
+        Agent automation is currently disabled; the label starts work only after setup and explicit enablement.
+        Claude will propose a PR into `dev`, Codex will review, and a human will decide whether to merge.
+        Database validation and deployment remain in existing CI, not agent jobs.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What problem should be solved, and what behavior should result?
+      placeholder: Describe the current behavior, desired behavior and who benefits.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Identify affected files or components, constraints and explicit exclusions.
+      placeholder: |
+        In scope:
+        Out of scope:
+        Constraints and compatibility requirements:
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance criteria
+      description: List observable outcomes that a reviewer can independently verify.
+      placeholder: |
+        - [ ] Expected behavior with a concrete example
+        - [ ] Failure or edge-case behavior
+        - [ ] Documentation or compatibility requirement, where relevant
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification instructions
+      description: Specify offline commands and expected results; identify any separate CI-only database checks.
+      placeholder: |
+        Offline commands and expected results:
+        Fixtures or edge cases:
+        Existing CI checks to observe:
+        Database checks must run in existing CI; agent jobs receive no Snowflake credentials.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Optional related issues, repository paths, nonsecret examples or design references.

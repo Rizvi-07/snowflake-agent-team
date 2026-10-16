@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "head_sha", "summary", "findings", "limitations"],
+  "properties": {
+    "status": {"type": "string", "enum": ["completed", "failed"]},
+    "head_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "findings": {
+      "type": "array", "maxItems": 10,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["severity", "file", "side", "line", "explanation", "recommendation"],
+        "properties": {
+          "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+          "file": {"type": "string", "minLength": 1, "maxLength": 300},
+          "side": {"type": "string", "enum": ["head", "base"]},
+          "line": {"type": "integer", "minimum": 1, "maximum": 1000000},
+          "explanation": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "recommendation": {"type": "string", "minLength": 1, "maxLength": 1000}
+        }
+      }
+    },
+    "limitations": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 500}}
+  }
+}

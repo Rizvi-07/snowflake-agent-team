@@ -1,0 +1,224 @@
+name: Codex advisory PR review
+
+on:
+  # Trusted base workflow only. PR code is read as Git blobs, never checked out.
+  pull_request_target:
+    branches: [dev, main]
+    types: [opened, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: codex-advisory-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  ENABLE_CODEX_REVIEW: ${{ vars.ENABLE_CODEX_REVIEW }}
+  CLAUDE_AGENT_APP_SLUG: ${{ vars.CLAUDE_AGENT_APP_SLUG }}
+  CLAUDE_AGENT_APP_BOT_ID: ${{ vars.CLAUDE_AGENT_APP_BOT_ID }}
+
+jobs:
+  authorize:
+    if: >-
+      vars.ENABLE_CODEX_REVIEW == 'true' &&
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.state == 'open' &&
+      github.repository == 'Rizvi-07/snowflake-agent-team' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      approved: ${{ steps.admit.outputs.approved }}
+      plan: ${{ steps.admit.outputs.plan }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Verify live actors, repository, base and exact head before secrets
+        id: admit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/agents/review_pr.py authorize
+
+  review:
+    needs: authorize
+    if: needs.authorize.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      review_json: ${{ steps.codex.outputs.final-message }}
+    env:
+      REVIEW_PLAN: ${{ needs.authorize.outputs.plan }}
+    steps:
+      - name: Check out trusted controller only (never the PR)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Recheck admission and prepare bounded base-guided text snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/agents/review_pr.py prepare
+      - name: Require the explicitly configured OpenAI API secret
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          if not os.environ.get('OPENAI_API_KEY', '').strip():
+              print('::error::OPENAI_API_KEY is missing. Configure it before enabling ENABLE_CODEX_REVIEW.', file=sys.stderr)
+              sys.exit(1)
+          PY
+      # LAST step: privilege removal protects the secret/proxy; no host step runs
+      # after model output. Only the final structured message crosses jobs.
+      - name: Generate static advisory review with read-only privileges
+        id: codex
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: "0.163.0"
+          permission-profile: ":read-only"
+          safety-strategy: drop-sudo
+          allow-bots: "false"
+          allow-bot-users: ${{ fromJSON(needs.authorize.outputs.plan).allowed_bot }}
+          working-directory: ${{ runner.temp }}/codex-advisory/work
+          codex-home: ${{ runner.temp }}/codex-advisory/home
+          prompt-file: ${{ runner.temp }}/codex-advisory/prompt.txt
+          output-schema-file: ${{ runner.temp }}/codex-advisory/schema.json
+          codex-args: '["--ephemeral"]'
+
+  publish:
+    needs: [authorize, review]
+    if: always() && needs.authorize.outputs.approved == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      # No checkout, repository scripts, model commands, API key or database secrets.
+      - name: Validate result and update the one advisory comment
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          REVIEW_PLAN: ${{ needs.authorize.outputs.plan }}
+          REVIEW_RESULT: ${{ needs.review.outputs.review_json }}
+          REVIEW_JOB_RESULT: ${{ needs.review.result }}
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const repo = {owner: 'Rizvi-07', repo: 'snowflake-agent-team'};
+            const marker = '<!-- codex-advisory-review:v1 -->';
+            const plan = JSON.parse(process.env.REVIEW_PLAN);
+            const sha = /^[0-9a-f]{40}$/;
+            if (!Number.isSafeInteger(plan.number) || plan.number < 1 || !sha.test(plan.head_sha) ||
+                !sha.test(plan.base_sha) || !['dev', 'main'].includes(plan.base_ref) ||
+                !/^\d+$/.test(plan.run_id) || !/^\d+$/.test(plan.run_attempt)) {
+              throw new Error('Invalid trusted admission plan; publication refused.');
+            }
+            async function current() {
+              if (process.env.ENABLE_CODEX_REVIEW !== 'true') return false;
+              const {data: pr} = await github.rest.pulls.get({...repo, pull_number: plan.number});
+              return pr.state === 'open' && pr.head.sha === plan.head_sha && pr.base.sha === plan.base_sha &&
+                pr.base.ref === plan.base_ref && pr.head.repo?.full_name === 'Rizvi-07/snowflake-agent-team' &&
+                pr.base.repo?.full_name === 'Rizvi-07/snowflake-agent-team';
+            }
+            if (!await current()) { core.notice('PR closed or changed; stale review was not published.'); return; }
+            // Recheck every admitted actor. The exact App identity is the only bot exception.
+            for (const [login, identity] of Object.entries(plan.actors)) {
+              const {data: user} = await github.rest.users.getByUsername({username: login});
+              if (user.login !== identity.login || user.id !== identity.id || user.type !== identity.type) {
+                throw new Error('Actor identity changed; publication refused.');
+              }
+              if (identity.type === 'Bot') {
+                if (!plan.app || login !== process.env.CLAUDE_AGENT_APP_SLUG + '[bot]' ||
+                    String(identity.id) !== process.env.CLAUDE_AGENT_APP_BOT_ID ||
+                    identity.id !== plan.app.id || login !== plan.app.login) {
+                  throw new Error('Unconfigured App identity; publication refused.');
+                }
+              } else {
+                const {data: access} = await github.rest.repos.getCollaboratorPermissionLevel({...repo, username: login});
+                if (identity.type !== 'User' || !['write', 'maintain', 'admin'].includes(access.permission)) {
+                  throw new Error('Maintainer permission revoked; publication refused.');
+                }
+              }
+            }
+            const exact = (obj, keys) => obj && typeof obj === 'object' && !Array.isArray(obj) &&
+              Object.keys(obj).sort().join(',') === [...keys].sort().join(',');
+            const text = (value, max) => typeof value === 'string' && value.trim().length > 0 &&
+              value.length <= max && !/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]/u.test(value) &&
+              !/-----BEGIN (?:[A-Z ]+)?PRIVATE KEY-----|\bsk-[A-Za-z0-9_-]{20,}|\bgh[opusr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}/.test(value);
+            let review, failed = true;
+            try {
+              const raw = process.env.REVIEW_RESULT || '';
+              if (process.env.REVIEW_JOB_RESULT !== 'success' || Buffer.byteLength(raw, 'utf8') > 32000) throw new Error();
+              review = JSON.parse(raw);
+              if (!exact(review, ['status', 'head_sha', 'summary', 'findings', 'limitations']) ||
+                  !['completed', 'failed'].includes(review.status) || review.head_sha !== plan.head_sha ||
+                  !text(review.summary, 2000) || !Array.isArray(review.findings) || review.findings.length > 10 ||
+                  !Array.isArray(review.limitations) || review.limitations.length > 8 ||
+                  !review.limitations.every(item => text(item, 500))) throw new Error();
+              const {data: files} = await github.rest.pulls.listFiles({...repo, pull_number: plan.number, per_page: 100, page: 1});
+              if (files.length > 50) throw new Error();
+              for (const finding of review.findings) {
+                if (!exact(finding, ['severity', 'file', 'side', 'line', 'explanation', 'recommendation']) ||
+                    !['P0', 'P1', 'P2', 'P3'].includes(finding.severity) || !text(finding.file, 300) ||
+                    !files.some(file => file.filename === finding.file || file.previous_filename === finding.file) ||
+                    !['head', 'base'].includes(finding.side) || !Number.isSafeInteger(finding.line) ||
+                    finding.line < 1 || finding.line > 1000000 || !text(finding.explanation, 2000) ||
+                    !text(finding.recommendation, 1000)) throw new Error();
+              }
+              if (review.status === 'failed' && review.findings.length) throw new Error();
+              failed = review.status !== 'completed';
+            } catch {
+              // Never print invalid model text, commands, or credential-like output.
+              review = undefined;
+            }
+            const escape = value => value.replace(/[\\`*_{}\[\]()#!|~]/g, '\\$&')
+              .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/@/g, '@\u200b');
+            const lines = [marker, `<!-- head:${plan.head_sha} run:${plan.run_id} attempt:${plan.run_attempt} -->`,
+              '### Codex advisory review', '', `Commit: \`${plan.head_sha}\``, ''];
+            if (failed) {
+              lines.push('**Review failed. No review conclusions are available.**',
+                'Inspect the Actions run for admission, missing-secret, model, timeout, or output-validation errors.');
+            } else {
+              lines.push(review.findings.length ? '**Actionable findings**' : '**No actionable findings.**', '', escape(review.summary));
+              for (const finding of [...review.findings].sort((a, b) => a.severity.localeCompare(b.severity))) {
+                lines.push('', `- **${finding.severity}** — ${escape(finding.file)} (${finding.side}, line ${finding.line})`,
+                  `  ${escape(finding.explanation)}`, `  Recommendation: ${escape(finding.recommendation)}`);
+              }
+            }
+            lines.push('', '**Verification limits:** Static text review only; no PR scripts, tests, dependency installation, or database execution.');
+            if (!failed) for (const limit of review.limitations) lines.push(`- ${escape(limit)}`);
+            lines.push('', 'Advisory only. Existing CI and human merge decisions remain required.',
+              `[Actions run](https://github.com/Rizvi-07/snowflake-agent-team/actions/runs/${plan.run_id}/attempts/${plan.run_attempt})`);
+            let body = lines.join('\n');
+            if (Buffer.byteLength(body, 'utf8') > 60000) {
+              failed = true;
+              body = lines.slice(0, 6).join('\n') + '\n**Review failed.** Rendered output exceeded the publication limit; no conclusions are available.';
+            }
+            const comments = [];
+            for (let page = 1; page <= 10; page++) {
+              const {data} = await github.rest.issues.listComments({...repo, issue_number: plan.number, per_page: 100, page});
+              comments.push(...data);
+              if (data.length < 100) break;
+              if (page === 10) throw new Error('Comment visibility limit reached; refusing duplicate publication.');
+            }
+            const own = comments.filter(comment => comment.user?.login === 'github-actions[bot]' &&
+              comment.user?.type === 'Bot' && comment.body?.startsWith(marker + '\n'));
+            if (own.length > 1) throw new Error('Multiple advisory comments exist; human cleanup required.');
+            const previous = own[0]?.body.match(/<!-- head:[0-9a-f]{40} run:(\d+) attempt:(\d+) -->/);
+            if (previous && (BigInt(previous[1]) > BigInt(plan.run_id) ||
+                (previous[1] === plan.run_id && BigInt(previous[2]) > BigInt(plan.run_attempt)))) {
+              core.notice('Newer review already published; older run did not overwrite it.'); return;
+            }
+            if (!await current()) { core.notice('PR changed before publication; result discarded.'); return; }
+            if (own.length) await github.rest.issues.updateComment({...repo, comment_id: own[0].id, body});
+            else await github.rest.issues.createComment({...repo, issue_number: plan.number, body});
+            if (failed) core.setFailed('Advisory review failed; a failure comment was published (not a clean review).');
