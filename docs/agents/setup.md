@@ -130,8 +130,13 @@ set both before enabling Codex. No model variable is currently read. Neither
 workflow explicitly selects a model: the action/CLI defaults apply and may
 change. There is no `CLAUDE_MODEL` or `CODEX_MODEL` override in this code.
 A fixed model would require a separate human-maintained workflow change.
-Claude is bounded by 20 turns, an estimated USD 5 run budget and a 30-minute job
-timeout. Codex pins CLI/proxy `0.163.0` with a 20-minute review job, text/schema
+Claude uses `--max-turns 40`, an estimated USD 5 run budget and a 30-minute job
+timeout. The turn allowance was raised from 20 as a bounded workaround for
+issue #19 and upstream #1795; it loosens execution limits, does not fix the
+counting discrepancy, and does not guarantee success. See the
+[diagnosis and release/retry procedure](claude-developer.md#issue-19-bounded-turn-limit-workaround).
+The pinned action v1.0.251 selects CLI 2.1.301. Codex pins CLI/proxy `0.163.0`
+with a 20-minute review job, text/schema
 bounds, and no configured hard dollar cap. Check provider billing controls
 before enabling; timeouts and output bounds are not a spending guarantee.
 
@@ -407,3 +412,20 @@ actual Dev validation/cleanup; required-check/production environment settings.
 The source tests confirm preserved controls, but repository settings and live
 runs were not queried in this review. The owner reported prior production
 success; this work does not independently re-verify that run.
+
+### Turn-limit maintenance verification
+
+For the issue #19 workaround on **2026-10-16**, the same unittest commands and
+Node path above produced **38 Claude tests**, **132 full tests** and **25
+ingestion tests**, all passed with no skips (**157 unique tests**). `pip check`
+and `git diff --check` passed. The comparison against `origin/dev` also included
+the Codex workflow and `scripts/agents/`; these and all existing database
+workflows, CI profile and dependency pins were unchanged. Current output is in
+ignored `logs/claude-turn-limit-tests.log` and
+`logs/claude-turn-limit-ingestion-tests.log`. Actionlint was not rerun for this
+maintenance change; the earlier lint results above describe the initial
+integration review. YAML parsing and workflow structure/failure checks passed.
+No paid model call, live workflow retry, repository settings change or Snowflake
+SQL was performed. After human release to main, use the
+[fresh-event retry procedure](claude-developer.md#issue-19-bounded-turn-limit-workaround)
+to verify actual behavior; the increased limit is not a guaranteed fix.
