@@ -43,9 +43,10 @@ action receives a static prompt to read that file as untrusted task input;
 event bodies/titles are never embedded in a shell program.
 
 Claude uses the official `anthropics/claude-code-action`, pinned to reviewed
-`v1` commit `374f254f5efaf968abfe15d399fd90972e8138b9`. The action's own runtime
-installation remains upstream behavior; pinning the wrapper is not a complete
-lock of every downloaded dependency. The model gets a repository-only **read**
+`v1.0.251` commit `374f254f5efaf968abfe15d399fd90972e8138b9`. Its installer
+selects Claude Code **2.1.301**; this workflow does not supply a custom executable.
+Pinning the wrapper is not a complete lock of every downloaded dependency.
+The model gets a repository-only **read**
 App token and local file/shell tools. It implements and runs relevant offline
 checks, and writes a structured summary, acceptance evidence and untested work.
 The collector also runs both repository unittest suites, `pip check` and
@@ -124,7 +125,9 @@ Technically enforced by workflow/controller and token separation:
   rerun actor permissions before the API secret is referenced.
 - Per-issue concurrency, no automatic cancellation, queued events, admission
   timeout 5 minutes, model job 30 minutes, publisher 10 minutes, reporting 2
-  minutes. Claude has at most 20 turns and a CLI budget of USD 5 per invocation.
+  minutes. Claude is configured with `--max-turns 40` and a CLI budget of USD 5
+  per invocation. The turn setting is a bounded workaround for the upstream
+  discrepancy described below, not a guarantee about reported `num_turns`.
   These bounds do not guarantee an exact invoice or stop already completed writes.
 - The model is supplied only a read installation token; the fresh publisher
   mints a separate write token and executes no model/generated code. Tokens
@@ -191,6 +194,58 @@ update, paid work or a PR already created. A failed publisher may leave Git
 objects, a branch update or a PR; no reset, force push or automatic deletion is
 used for recovery. Revoking the App/API credential is an owner emergency action.
 
+## Issue #19: bounded turn-limit workaround
+
+Reviewed on **2026-10-16** as a separate human-maintained workflow task. The
+owner reported CLI **2.1.301**, `subtype: success`, `is_error: false` and
+`num_turns: 21` with configured `maxTurns: 20`, followed by an action failure.
+Those run details were supplied by the owner; this maintenance review did not
+retrieve the private run logs or replay the paid request.
+
+The official [release list](https://github.com/anthropics/claude-code-action/releases)
+and [v1.0.251 release](https://github.com/anthropics/claude-code-action/releases/tag/v1.0.251)
+showed that the repository already pins the latest numbered release inspected.
+Its [release commit](https://github.com/anthropics/claude-code-action/commit/374f254f5efaf968abfe15d399fd90972e8138b9)
+bumps the CLI to 2.1.301 and SDK dependency to 0.3.301; it does not fix this
+comparison. The pinned [installer source](https://github.com/anthropics/claude-code-action/blob/374f254f5efaf968abfe15d399fd90972e8138b9/src/entrypoints/run.ts)
+selects that CLI version. The pinned [result validator](https://github.com/anthropics/claude-code-action/blob/374f254f5efaf968abfe15d399fd90972e8138b9/base-action/src/run-claude-sdk.ts#L224-L232)
+throws when a successful, non-error result has `num_turns > maxTurns`.
+That condition explains the supplied 21-versus-20 error.
+
+Upstream [issue #1795](https://github.com/anthropics/claude-code-action/issues/1795)
+reports that CLI rounds and result-message turn counts differ, especially with
+parallel tools. This is the reported mechanism, not an independently measured
+round count for issue #19. The issue and proposed [fix #1814](https://github.com/anthropics/claude-code-action/pull/1814)
+were still open when inspected. No supported released fix was found, so the
+official action remains pinned to the same full SHA, now annotated `v1.0.251`.
+No fork, unreleased patch, custom CLI or local counter override is installed.
+
+The workaround changes only `--max-turns 20` to **`--max-turns 40`**. This
+also doubles the configured execution allowance; it does not correct the
+counting discrepancy. A reported count of 21 would not exceed 40 in that
+comparison, but a new run can report more than 40 or fail for other reasons.
+There is **no success guarantee**. Keep the existing **USD 5** CLI budget and
+**30-minute** model job timeout (admission 5, publisher 10, report 2 minutes).
+Budget/timeout controls are not an exact invoice guarantee.
+
+Action failures still stop collection and artifact upload; the publisher
+requires a successful model job and independently validates the artifact.
+Even a raw CLI result saying success cannot authorize publication after an
+action failure. Do not recover by uploading a failed run's working tree,
+enabling full-output logs, ignoring errors or repeatedly increasing the cap.
+If this recurs, inspect the sanitized error, reduce/re-triage the task, or wait
+for a reviewed official release that fixes the comparison. Keep read-only
+model credentials and the separate write publisher.
+
+Roll out through a human-reviewed **fix branch → dev → main** release. The
+issue-event workflow must reach default branch `main` before it can use the
+new setting. Rerunning an old run uses its original workflow revision; it is
+not proof that this change was exercised. After release, an authorized human
+can inspect issue #19 and any existing issue branch/PR, then remove/reapply
+`ai` to the still-open, approved issue to create a fresh event. Existing
+ownership/revision checks still apply; resolve orphan/foreign/conflicting work
+manually. No automatic retry or publication from the failed run is added.
+
 ## Offline checks and remaining live verification
 
 ```powershell
@@ -201,17 +256,25 @@ used for recovery. Revoking the App/API credential is an owner emergency action.
 git diff --check
 ```
 
-Observed on 2026-10-16: 28 agent-specific tests passed; the complete suites
-passed with 25 ingestion and 88 pipeline/agent tests (113 total). Dependency
-and whitespace checks passed. Checks also passed for local documentation links,
-issue-form fields and unchanged database workflows/config/runtime pins. Tests
-include a real temporary Git retry fixture and execution of the workflow's
-failure-report program; GitHub/model interactions remain mocked.
+Turn-limit maintenance verification on 2026-10-16: **38** agent-specific tests
+passed; the full suites passed with **25** ingestion and **132** pipeline/agent
+tests (**157 unique tests**, no skips). The full suite used the local Node path
+in [owner setup](setup.md#offline-verification-and-outstanding-live-checks).
+Dependency and whitespace checks passed. New regressions check the 40-turn
+configuration with unchanged budget/timeout/logging, publication success gates,
+and rejection of a failed action despite a raw CLI success result. Existing
+checks execute the real failure-report program and temporary Git retries;
+GitHub/model interactions remain mocked. The dbt suite emits an upstream
+logger ResourceWarning but exits successfully; it never connects to Snowflake.
 
-SHA256-verified actionlint 1.7.12 passed with shellcheck/pyflakes disabled and
-only its known unsupported `concurrency.queue` diagnostic excluded. This is a
-static check, not a GitHub run. See the
-[upstream compatibility issue](https://github.com/rhysd/actionlint/issues/657).
+Database/Codex workflows, controller, CI profile and dependency pins are
+unchanged from `origin/dev`. YAML parsing/structure checks ran in the suites.
+The initial integration review also passed SHA256-verified actionlint 1.7.12
+with shellcheck/pyflakes disabled and only its unsupported `concurrency.queue`
+diagnostic excluded ([compatibility issue](https://github.com/rhysd/actionlint/issues/657)).
+That executable is no longer installed; actionlint was **not rerun** for this
+maintenance change. Neither static checks nor the mocked conflicting-result
+test replay the upstream CLI or prove that a new paid run will succeed.
 
 No setup, model invocation, App installation, secret/variable update, push or
 PR creation is part of local verification. A real owner-approved GitHub run must

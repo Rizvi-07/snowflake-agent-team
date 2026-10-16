@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -390,6 +391,24 @@ class AgentTests(unittest.TestCase):
                 self.assertEqual(run.call_count, 1)
                 self.assertFalse(Path('payload.json').exists())
 
+    def test_failed_action_cannot_publish_even_when_cli_result_reports_success(self):
+        plan = agent.make_plan(self.api)
+        with self.cwd(), patch.dict(os.environ, {'CLAUDE_CONCLUSION': 'failure'}):
+            Path('.agent-task').mkdir()
+            Path('.agent-task/report.json').write_text(json.dumps(self.payload()['report']))
+            # Reproduce the reported conflicting signals without invoking the CLI.
+            # A raw successful result never overrides the action's failure.
+            Path('execution-output.json').write_text(json.dumps([
+                {'type': 'result', 'subtype': 'success', 'is_error': False, 'num_turns': 21},
+            ]))
+            with patch.object(agent, 'git') as git, patch.object(agent.subprocess, 'run') as checks:
+                with self.assertRaisesRegex(agent.AgentError, 'no publication artifact'):
+                    agent.collect(plan, Path('output/payload.json'))
+                git.assert_not_called()
+                checks.assert_not_called()
+            self.assertFalse(Path('output/payload.json').exists())
+            self.assertEqual(self.api.writes, [])
+
     def test_collect_success_protected_paths_and_symlinks(self):
         plan = agent.make_plan(self.api)
         with self.cwd(), patch.dict(os.environ, {'CLAUDE_CONCLUSION': 'success'}):
@@ -500,10 +519,30 @@ class AgentWorkflowTests(unittest.TestCase):
         self.assertLess(recheck, app); self.assertLess(app, model)
         self.assertEqual(steps[app]['with']['permission-contents'], 'read')
         self.assertEqual(steps[model]['with']['github_token'], '${{ steps.read-token.outputs.token }}')
-        self.assertIn('--max-turns 20', steps[model]['with']['claude_args'])
-        self.assertIn('--max-budget-usd 5', steps[model]['with']['claude_args'])
         self.assertIn('anthropics/claude-code-action@', steps[model]['uses'])
         self.assertNotIn('${{ github.event.', steps[model]['with']['prompt'])
+
+    def test_turn_workaround_preserves_other_bounds_and_failure_gates(self):
+        develop = self.jobs['develop']
+        model = next(step for step in develop['steps'] if step.get('id') == 'claude')
+        self.assertEqual(model['uses'], 'anthropics/claude-code-action@374f254f5efaf968abfe15d399fd90972e8138b9')
+        self.assertEqual(shlex.split(model['with']['claude_args']), [
+            '--max-turns', '40', '--max-budget-usd', '5',
+            '--tools', 'Read,Glob,Grep,Edit,Write,Bash',
+            '--allowedTools', 'Read,Glob,Grep,Edit,Write,Bash',
+        ])
+        self.assertEqual(develop['timeout-minutes'], '30')
+        for setting in ('show_full_output', 'display_report', 'classify_inline_comments'):
+            self.assertEqual(model['with'][setting], 'false')
+        # Collection and transfer retain the implicit success() gate. A failed
+        # wrapper must not be rescued by a raw CLI result, always() or a retry.
+        for step in develop['steps']:
+            self.assertNotIn('if', step)
+        for job in self.jobs.values():
+            self.assertNotIn('continue-on-error', job)
+        collector = next(step for step in develop['steps'] if step.get('run', '').endswith(' collect'))
+        self.assertEqual(collector['env']['CLAUDE_CONCLUSION'], '${{ steps.claude.outputs.conclusion }}')
+        self.assertEqual(self.jobs['publish']['if'], "needs.authorize.outputs.approved == 'true' && needs.develop.result == 'success'")
 
     def test_publisher_is_fresh_trusted_job_with_no_model_or_artifact_execution(self):
         job = self.jobs['publish']
