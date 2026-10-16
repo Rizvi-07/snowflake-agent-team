@@ -21,12 +21,27 @@ select
     average_price,
     minimum_price,
     maximum_price,
-    -- Share of the total price across all categories; 0.00 when that total is zero.
+    -- Share of the total price across all categories, rounded half up to
+    -- hundredths; 0.00 when that total is zero. Exact quotient/remainder
+    -- arithmetic counts hundredths of a percent without rounding a quotient:
+    -- hundredths = floor(total * 10000 / overall), plus 1 when the remainder
+    -- is at least half the overall total. See docs/products-price-share.md.
+    -- gold_price_share_pct_boundaries reuses the text between the markers.
+    -- price_share_pct:begin
     cast(
         case
             when overall_total_price = 0 then 0
-            else round(total_price * 100 / overall_total_price, 2)
+            else (
+                (total_price * 10000 - mod(total_price * 10000, overall_total_price))
+                    / overall_total_price
+                + case
+                    when mod(total_price * 10000, overall_total_price) * 2 >= overall_total_price then 1
+                    else 0
+                end
+            ) * 0.01
         end
         as number(5, 2)
-    ) as price_share_pct
+    )
+    -- price_share_pct:end
+    as price_share_pct
 from overall

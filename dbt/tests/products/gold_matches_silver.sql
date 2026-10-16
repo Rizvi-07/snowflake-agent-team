@@ -13,13 +13,7 @@ with silver as (
 ), expected as (
     select
         *,
-        cast(
-            case
-                when sum(total_price) over () = 0 then 0
-                else round(total_price * 100 / sum(total_price) over (), 2)
-            end
-            as number(5, 2)
-        ) as price_share_pct
+        sum(total_price) over () as overall_total_price
     from silver
 ), actual as (
     select * from {{ ref('product_category_summary') }}
@@ -38,4 +32,12 @@ where expected.product_count is distinct from actual.product_count
     or expected.average_price is distinct from actual.average_price
     or expected.minimum_price is distinct from actual.minimum_price
     or expected.maximum_price is distinct from actual.maximum_price
-    or expected.price_share_pct is distinct from actual.price_share_pct
+    -- Without dividing or rounding: a two-decimal share p is the half-up
+    -- rounding of total * 100 / overall exactly when
+    -- (p - 0.005) * overall <= total * 100 < (p + 0.005) * overall.
+    or actual.price_share_pct is null
+    or (expected.overall_total_price = 0 and actual.price_share_pct <> 0)
+    or (expected.overall_total_price <> 0 and not (
+        (actual.price_share_pct - 0.005) * expected.overall_total_price <= expected.total_price * 100
+        and expected.total_price * 100 < (actual.price_share_pct + 0.005) * expected.overall_total_price
+    ))
