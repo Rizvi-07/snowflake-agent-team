@@ -31,7 +31,9 @@ models:
   - name: product_category_summary
     description: >-
       One row per category. Counts include all Silver rows; prices are fixed-point
-      and averages are represented to six decimal places. Reconciliation tests
+      and averages are represented to six decimal places. price_share_pct is each
+      category's percentage of the total price across all categories, rounded to
+      NUMBER(5,2), and 0.00 when that total is zero. Reconciliation tests
       compare every aggregate with Silver, including missing/extra categories.
     columns:
       - name: category
@@ -50,4 +52,7 @@ models:
       - name: minimum_price
         data_tests: [not_null, nonnegative]
       - name: maximum_price
+        data_tests: [not_null, nonnegative]
+      - name: price_share_pct
+        description: Category total price / total price across all categories x 100.
         data_tests: [not_null, nonnegative]
