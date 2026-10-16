@@ -196,27 +196,62 @@ def installation_only(api, slug):
         raise AgentError("Minted App identity differs from the configured App.")
 
 
-def allowed_path(name):
+def path_rejection_reason(name):
+    """Return a fixed policy reason, or None for an allowed publication path."""
     path = PurePosixPath(name)
-    if (not name or len(name) > 240 or not re.fullmatch(r"[A-Za-z0-9_./-]+", name)
-            or str(path) != name or path.is_absolute() or any(p in {".", ".."} or p.startswith('.') for p in path.parts)
-            or path.name.upper().startswith(("AGENTS.", "CLAUDE.")) or name in PROTECTED):
-        return False
+    if not name:
+        return "empty paths are not permitted"
+    if len(name) > 240:
+        return "path exceeds the 240-character limit"
+    if not re.fullmatch(r"[A-Za-z0-9_./-]+", name):
+        return "path contains characters outside the permitted ASCII path alphabet"
+    if path.is_absolute():
+        return "absolute paths are not permitted"
+    if str(path) != name:
+        return "path is not in canonical repository-relative form"
+    if any(p in {".", ".."} for p in path.parts):
+        return "path traversal is not permitted"
+    if any(p.startswith('.') for p in path.parts):
+        if name.startswith(".github/"):
+            return "GitHub workflows and repository controls require human maintenance"
+        return "hidden path components are not permitted"
+    if path.name.upper().startswith(("AGENTS.", "CLAUDE.")):
+        return "agent instruction files require human maintenance"
+    if name in PROTECTED:
+        return "explicitly protected pipeline or agent control file requires human maintenance"
     if name == "README.md":
-        return True
+        return None
     if name.startswith("docs/"):
-        return not name.startswith("docs/agents/") and path.suffix in {".md", ".rst", ".txt"}
-    if name.startswith("dbt/models/"):
-        return path.suffix in {".sql", ".yml", ".yaml"}
-    if name.startswith("dbt/tests/"):
-        return path.suffix in {".sql", ".yml", ".yaml"}
+        if name.startswith("docs/agents/"):
+            return "agent guidance and setup documentation require human maintenance"
+        return None if path.suffix in {".md", ".rst", ".txt"} else "documentation permits only .md, .rst and .txt files"
+    if name.startswith(("dbt/models/", "dbt/tests/")):
+        return None if path.suffix in {".sql", ".yml", ".yaml"} else "dbt models and tests permit only .sql, .yml and .yaml files"
     if name.startswith("sample_data/"):
-        return path.suffix in {".csv", ".json"}
+        return None if path.suffix in {".csv", ".json"} else "sample data permits only .csv and .json files"
     if name.startswith(("app/", "src/", "ingestion/", "scripts/", "tests/")):
         if re.search(r"(?:^|[/_-])(auth(?:entication)?|permissions?|deploy(?:ment)?)(?:[/_.-]|$)", name, re.I):
-            return False
-        return not name.startswith("scripts/agents/") and path.suffix == ".py"
-    return False
+            return "authentication, permission and deployment paths require human maintenance"
+        if name.startswith("scripts/agents/"):
+            return "agent controller files require human maintenance"
+        return None if path.suffix == ".py" else "application and test directories permit only .py files"
+    return "path is outside the initial agent publication allowlist"
+
+
+def allowed_path(name):
+    return path_rejection_reason(name) is None
+
+
+def diagnostic_path(name):
+    """JSON string literal; unsafe characters escaped, credential-like names withheld."""
+    if CREDENTIAL_PATTERN.search(name):
+        return '"[REDACTED credential-like filename]"'
+    return '"' + ''.join(
+        character if re.fullmatch(r"[A-Za-z0-9_./-]", character)
+        else (f"\\u{ord(character):04x}" if ord(character) < 128
+              else json.dumps(character, ensure_ascii=True)[1:-1])
+        for character in name
+    ) + '"'
 
 
 def git(*args):
@@ -227,7 +262,9 @@ def git(*args):
 
 
 def names(data):
-    return [name for name in data.decode("utf-8").split("\0") if name]
+    # Git filenames are bytes; undecodable names must be rejected and safely
+    # identified rather than hiding every path behind a generic decode error.
+    return [name for name in data.decode("utf-8", errors="surrogateescape").split("\0") if name]
 
 
 def prepare(api, plan):
@@ -292,13 +329,20 @@ def collect(plan, output):
     paths = set(names(git("diff", "--no-renames", "--name-only", "-z", plan["base_sha"])))
     paths.update(path for path in names(git("ls-files", "--others", "--exclude-standard", "-z"))
                  if not path.startswith((".agent-control/", ".agent-task/", ".claude/")))
+    blocked = []
+    for name in sorted(paths):
+        reason = path_rejection_reason(name)
+        if reason is None:
+            path = Path(name)
+            if any(parent.is_symlink() for parent in (path, *path.parents)) or path.is_dir():
+                reason = "symlinks and directories cannot be published as files"
+        if reason:
+            blocked.append(f"  {diagnostic_path(name)}: {reason}")
+    if blocked:
+        raise AgentError("Claude changed protected or invalid paths; no artifact or PR will be published.\n" + '\n'.join(blocked))
     files = []
     for name in sorted(paths):
-        if not allowed_path(name):
-            raise AgentError("Claude changed a protected path; no artifact or PR will be published.")
         path = Path(name)
-        if any(parent.is_symlink() for parent in (path, *path.parents)) or path.is_dir():
-            raise AgentError("Symlinks/directories cannot be published as files.")
         files.append({"path": name, "content": base64.b64encode(path.read_bytes()).decode() if path.exists() else None})
     payload = {"files": files, "report": json.loads(Path(".agent-task/report.json").read_text(encoding="utf-8")),
                "checks": CHECK_RESULTS}

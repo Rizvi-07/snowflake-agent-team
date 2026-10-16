@@ -180,6 +180,40 @@ a nonzero result and a final workflow status summary. Raw child/API diagnostics
 are suppressed; model output is not uploaded as logs. No automatic repair loop,
 auto-merge or database deployment is started by this workflow.
 
+When collection rejects paths, its error lists **every blocked path** in sorted
+order with a fixed policy reason. Paths are repository-relative Git names,
+printed as JSON string literals; characters outside the permitted ASCII path
+alphabet are escaped, including newlines, terminal controls, quotes, Unicode
+and shell/workflow-command punctuation. Non-UTF-8 filename bytes are escaped
+as surrogate code points. Credential-like filenames matching the existing
+credential detector are withheld entirely as `[REDACTED credential-like filename]`.
+No file contents, environment values, task reports or raw Claude output are
+included. All path and symlink/directory checks finish before candidate contents
+are read or offline checks run. Any blocked path still fails collection and
+prevents artifact publication; this adds no scope exception. The publisher and
+existing-PR preparation use the same unchanged allowlist decisions.
+
+For example, an illustrative error entry is:
+
+```text
+  "docs/agents/new.md": agent guidance and setup documentation require human maintenance
+```
+
+The earlier generic protected-path failure does not establish which file caused
+it. Do not infer a filename from that message or publish the rejected working
+tree manually. Inspect the new diagnostics after this human-maintained change
+reaches the trusted default-branch workflow revision; then correct the task's
+scope or handle the protected edit in a separate human-maintained task.
+
+Offline verification for this diagnostic change on 2026-10-16 passed **44**
+Claude tests, **138** full-suite tests (including those 44) and **25** ingestion
+tests: **163 unique tests**, no skips. Six focused regressions cover policy
+reasons, rejection before content/report reads, safe filename escaping,
+non-UTF-8 names, credential-like filenames, and symlink/directory reporting.
+The baseline comparison matched 3,074 sampled allowlist decisions and the
+protected-file set was unchanged. Dependency and whitespace checks passed.
+No live Actions run, paid model request or Snowflake execution was performed.
+
 Retries reuse only the same App's marked canonical open PR into dev. Other
 human/foreign PRs referring to the issue, duplicate PRs, closed attempts and a
 branch left without an owned open PR block work for human inspection. A missing
