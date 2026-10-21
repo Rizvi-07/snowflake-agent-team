@@ -32,6 +32,7 @@ where expected.product_count is distinct from actual.product_count
     or expected.average_price is distinct from actual.average_price
     or expected.minimum_price is distinct from actual.minimum_price
     or expected.maximum_price is distinct from actual.maximum_price
+    or expected.maximum_price - expected.minimum_price is distinct from actual.price_range
     -- Without dividing or rounding: a two-decimal share p is the half-up
     -- rounding of total * 100 / overall exactly when
     -- (p - 0.005) * overall <= total * 100 < (p + 0.005) * overall.
