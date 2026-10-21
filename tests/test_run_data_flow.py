@@ -150,7 +150,7 @@ class DataFlowTests(unittest.TestCase):
             target_path / "manifest.json", "agent_platform", "AGENTWAREHOUSEDEV",
             {layer: layer for layer in ("BRONZE", "SILVER", "GOLD")},
         )
-        self.assertEqual(len(selected), 37)
+        self.assertEqual(len(selected), 39)
 
     def test_pr_dry_run_routes_all_layers(self):
         status, stdout, stderr, process, connect = self.run_cli("--pr-number", "42")
