@@ -34,7 +34,8 @@ models:
       and averages are represented to six decimal places. price_share_pct is each
       category's percentage of the total price across all categories, rounded
       half up once to NUMBER(5,2) with exact quotient/remainder arithmetic, and
-      0.00 when that total is zero. Reconciliation tests
+      0.00 when that total is zero. price_range is maximum_price minus
+      minimum_price, 0.00 for a single product or equal prices. Reconciliation tests
       compare every aggregate with Silver, including missing/extra categories.
     columns:
       - name: category
@@ -56,4 +57,7 @@ models:
         data_tests: [not_null, nonnegative]
       - name: price_share_pct
         description: Category total price / total price across all categories x 100.
+        data_tests: [not_null, nonnegative]
+      - name: price_range
+        description: Category maximum price minus minimum price.
         data_tests: [not_null, nonnegative]

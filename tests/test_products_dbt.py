@@ -128,7 +128,7 @@ class ProductsDbtTests(unittest.TestCase):
                     self.assertEqual((node["database"], node["schema"]), (database, schema))
 
     def test_products_data_tests_are_compiled_and_selected(self):
-        self.assertEqual(len(self.data_tests), 35)
+        self.assertEqual(len(self.data_tests), 37)
         self.assertIn("bronze_to_silver_row_count", self.data_tests)
         self.assertIn("gold_matches_silver", self.data_tests)
         self.assertIn("gold_price_share_pct_in_range", self.data_tests)
@@ -141,7 +141,7 @@ class ProductsDbtTests(unittest.TestCase):
                 database = "AGENTWAREHOUSEPROD" if scenario == "prod" else "AGENTWAREHOUSEDEV"
                 path = ROOT / "dbt" / "target" / "offline" / scenario / "manifest.json"
                 selected = validate_manifest(path, "agent_platform", database, {layer: prefix + layer for layer in ("BRONZE", "SILVER", "GOLD")})
-                self.assertEqual(len(selected), 37)
+                self.assertEqual(len(selected), 39)
                 self.assertFalse(any("connection_check" in node or "my_first_dbt_model" in node or "my_second_dbt_model" in node for node in selected))
 
     def test_five_product_fixture_and_every_data_test(self):
@@ -149,8 +149,8 @@ class ProductsDbtTests(unittest.TestCase):
         self.assertEqual(self.failures(), set())
         rows = self.connection.execute("select * from product_category_summary order by category").fetchall()
         self.assertEqual(rows, [
-            ("Electronics", 3, Decimal("1199.39"), Decimal("399.796667"), Decimal("49.90"), Decimal("899.99"), Decimal("80.05")),
-            ("Furniture", 2, Decimal("298.90"), Decimal("149.450000"), Decimal("99.90"), Decimal("199.00"), Decimal("19.95")),
+            ("Electronics", 3, Decimal("1199.39"), Decimal("399.796667"), Decimal("49.90"), Decimal("899.99"), Decimal("80.05"), Decimal("850.09")),
+            ("Furniture", 2, Decimal("298.90"), Decimal("149.450000"), Decimal("99.90"), Decimal("199.00"), Decimal("19.95"), Decimal("99.10")),
         ])
         self.assertEqual(self.connection.execute("select typeof(price_share_pct) from product_category_summary limit 1").fetchone()[0], "DECIMAL(5,2)")
         self.assertEqual(self.connection.execute("select typeof(price) from stg_products limit 1").fetchone()[0], "DECIMAL(18,2)")
@@ -182,6 +182,39 @@ class ProductsDbtTests(unittest.TestCase):
         self.assertEqual(self.connection.execute("select category, price_share_pct from product_category_summary order by category").fetchall(), [
             ("Electronics", Decimal("0.00")), ("Furniture", Decimal("100.00")),
         ])
+
+    def test_single_product_category_has_zero_price_range(self):
+        rows = [
+            ("1", "Laptop", "Electronics", "899.99", "products.csv", "offline-batch", TIMESTAMP),
+            ("2", "Desk", "Furniture", "199.00", "products.csv", "offline-batch", TIMESTAMP),
+            ("3", "Chair", "Furniture", "99.90", "products.csv", "offline-batch", TIMESTAMP),
+        ]
+        self.build(rows)
+        self.assertEqual(self.failures(), set())
+        self.assertEqual(self.connection.execute("select category, price_range from product_category_summary order by category").fetchall(), [
+            ("Electronics", Decimal("0.00")), ("Furniture", Decimal("99.10")),
+        ])
+
+    def test_equal_price_category_has_zero_price_range(self):
+        rows = [
+            ("1", "Mouse", "Electronics", "25.50", "products.csv", "offline-batch", TIMESTAMP),
+            ("2", "Cable", "Electronics", "25.5", "products.csv", "offline-batch", TIMESTAMP),
+            ("3", "Hub", "Electronics", "25.50", "products.csv", "offline-batch", TIMESTAMP),
+            ("4", "Stool", "Furniture", "0", "products.csv", "offline-batch", TIMESTAMP),
+            ("5", "Bench", "Furniture", "0.00", "products.csv", "offline-batch", TIMESTAMP),
+        ]
+        self.build(rows)
+        self.assertEqual(self.failures(), set())
+        self.assertEqual(self.connection.execute("select category, price_range from product_category_summary order by category").fetchall(), [
+            ("Electronics", Decimal("0.00")), ("Furniture", Decimal("0.00")),
+        ])
+
+    def test_price_range_data_tests_detect_invalid_values(self):
+        self.build()
+        self.connection.execute("update product_category_summary set price_range = -0.01 where category = 'Furniture'")
+        self.assertTrue({"gold_matches_silver", "nonnegative_product_category_summary_price_range"} <= self.failures())
+        self.connection.execute("update product_category_summary set price_range = null where category = 'Furniture'")
+        self.assertTrue({"gold_matches_silver", "not_null_product_category_summary_price_range"} <= self.failures())
 
     def test_price_share_data_tests_detect_out_of_range_values(self):
         self.build()
@@ -293,7 +326,7 @@ class ProductsDbtTests(unittest.TestCase):
 
     def test_gold_reconciliation_detects_each_corrupted_metric(self):
         self.build()
-        for column in ("product_count", "total_price", "average_price", "minimum_price", "maximum_price", "price_share_pct"):
+        for column in ("product_count", "total_price", "average_price", "minimum_price", "maximum_price", "price_share_pct", "price_range"):
             with self.subTest(column=column):
                 self.connection.execute("delete from product_category_summary")
                 self.connection.execute("insert into product_category_summary " + self.model_sql("product_category_summary"))
@@ -306,7 +339,7 @@ class ProductsDbtTests(unittest.TestCase):
         self.assertIn("gold_matches_silver", self.failures())
         self.connection.execute("delete from product_category_summary")
         self.connection.execute("insert into product_category_summary " + self.model_sql("product_category_summary"))
-        self.connection.execute("insert into product_category_summary values ('Other', 1, 1, 1, 1, 1, 0)")
+        self.connection.execute("insert into product_category_summary values ('Other', 1, 1, 1, 1, 1, 0, 0)")
         self.assertIn("gold_matches_silver", self.failures())
 
 

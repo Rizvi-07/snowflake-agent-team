@@ -43,5 +43,8 @@ select
         as number(5, 2)
     )
     -- price_share_pct:end
-    as price_share_pct
+    as price_share_pct,
+    -- Exact fixed-point difference; 0.00 for a single product or equal prices.
+    -- See docs/products-price-range.md.
+    maximum_price - minimum_price as price_range
 from overall
