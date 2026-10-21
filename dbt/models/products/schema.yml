@@ -8,6 +8,8 @@ models:
       Fractional IDs are rejected rather than rounded to a different product.
       Prices allow at most two fractional digits; fractional cents and exponent
       notation become null rather than being silently rounded or coerced.
+      discounted_price is a demonstration 10% discount, round(price * 0.90, 2)
+      rounded half up to NUMBER(18,2); price is unchanged.
     columns:
       - name: product_id
         data_tests: [not_null, unique]
@@ -27,6 +29,9 @@ models:
         data_tests: [not_null, not_blank]
       - name: ingested_at
         data_tests: [not_null]
+      - name: discounted_price
+        description: Price after a fixed 10% discount, rounded half up to cents.
+        data_tests: [not_null, nonnegative]
 
   - name: product_category_summary
     description: >-
