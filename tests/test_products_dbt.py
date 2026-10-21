@@ -6,7 +6,7 @@ Dependencies: ingestion/requirements.txt and tests/requirements.txt.
 
 import csv
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from fractions import Fraction
 import json
 import random
@@ -128,11 +128,13 @@ class ProductsDbtTests(unittest.TestCase):
                     self.assertEqual((node["database"], node["schema"]), (database, schema))
 
     def test_products_data_tests_are_compiled_and_selected(self):
-        self.assertEqual(len(self.data_tests), 37)
+        self.assertEqual(len(self.data_tests), 41)
         self.assertIn("bronze_to_silver_row_count", self.data_tests)
         self.assertIn("gold_matches_silver", self.data_tests)
         self.assertIn("gold_price_share_pct_in_range", self.data_tests)
         self.assertIn("gold_price_share_pct_boundaries", self.data_tests)
+        self.assertIn("silver_discounted_price_within_price", self.data_tests)
+        self.assertIn("silver_discounted_price_boundaries", self.data_tests)
 
     def test_entrypoint_preflight_matches_the_explicit_products_graph(self):
         for scenario, manifest in self.manifests.items():
@@ -141,7 +143,7 @@ class ProductsDbtTests(unittest.TestCase):
                 database = "AGENTWAREHOUSEPROD" if scenario == "prod" else "AGENTWAREHOUSEDEV"
                 path = ROOT / "dbt" / "target" / "offline" / scenario / "manifest.json"
                 selected = validate_manifest(path, "agent_platform", database, {layer: prefix + layer for layer in ("BRONZE", "SILVER", "GOLD")})
-                self.assertEqual(len(selected), 39)
+                self.assertEqual(len(selected), 43)
                 self.assertFalse(any("connection_check" in node or "my_first_dbt_model" in node or "my_second_dbt_model" in node for node in selected))
 
     def test_five_product_fixture_and_every_data_test(self):
@@ -154,6 +156,61 @@ class ProductsDbtTests(unittest.TestCase):
         ])
         self.assertEqual(self.connection.execute("select typeof(price_share_pct) from product_category_summary limit 1").fetchone()[0], "DECIMAL(5,2)")
         self.assertEqual(self.connection.execute("select typeof(price) from stg_products limit 1").fetchone()[0], "DECIMAL(18,2)")
+        self.assertEqual(self.connection.execute("select typeof(discounted_price) from stg_products limit 1").fetchone()[0], "DECIMAL(18,2)")
+        self.assertEqual(self.connection.execute("select price, discounted_price from stg_products order by product_id").fetchall(), [
+            (Decimal("899.99"), Decimal("809.99")), (Decimal("249.50"), Decimal("224.55")), (Decimal("199.00"), Decimal("179.10")),
+            (Decimal("99.90"), Decimal("89.91")), (Decimal("49.90"), Decimal("44.91")),
+        ])
+
+    def test_discounted_price_examples(self):
+        prices = ("100.00", "49.90", "10.05", "0.00", "0")
+        rows = [(str(i + 1), f"Item {i + 1}", "Electronics", price, "products.csv", "offline-batch", TIMESTAMP) for i, price in enumerate(prices)]
+        self.build(rows)
+        self.assertEqual(self.failures(), set())
+        self.assertEqual(self.connection.execute("select price, discounted_price from stg_products order by product_id").fetchall(), [
+            (Decimal("100.00"), Decimal("90.00")), (Decimal("49.90"), Decimal("44.91")), (Decimal("10.05"), Decimal("9.05")),
+            (Decimal("0.00"), Decimal("0.00")), (Decimal("0.00"), Decimal("0.00")),
+        ])
+
+    def test_discounted_prices_match_exact_half_up_rounding(self):
+        generator = random.Random(30)
+        prices = [Decimal(generator.randrange(0, 10 ** generator.randrange(1, 18))) / 100 for _ in range(200)]
+        prices += [Decimal("9999999999999999.99"), Decimal("0.01"), Decimal("0.05"), Decimal("0.06")]
+        rows = [(str(i + 1), f"Item {i + 1}", "Furniture", str(price), "products.csv", "offline-batch", TIMESTAMP) for i, price in enumerate(prices)]
+        self.build(rows)
+        self.assertEqual(self.failures(), set())
+        actual = self.connection.execute("select price, discounted_price from stg_products order by product_id").fetchall()
+        expected = [(price, (price * Decimal("0.90")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)) for price in prices]
+        self.assertEqual(actual, expected)
+        self.assertTrue(all(Decimal(0) <= discounted <= price for price, discounted in actual))
+
+    def test_discounted_price_boundary_test_runs_the_model_expression(self):
+        model = self.nodes["model.agent_platform.stg_products"]["raw_code"]
+        expression = model.split("-- discounted_price:begin")[1].split("-- discounted_price:end")[0]
+        boundary = self.data_tests["silver_discounted_price_boundaries"]["compiled_code"]
+        self.assertEqual(boundary.count(expression), 1)
+        self.build()
+        self.assertEqual(self.connection.execute(self.local_sql(boundary)).fetchall(), [])
+        # Truncating instead of rounding half up loses the half cent.
+        defective = "cast(trunc(cast(price as number(38, 2)) * 90) * 0.01 as number(18, 2))"
+        failing = self.connection.execute(self.local_sql(boundary.replace(expression, defective))).fetchall()
+        self.assertEqual({row[0] for row in failing}, {"half_cent", "one_cent", "five_cents"})
+
+    def test_discounted_price_data_tests_detect_invalid_values(self):
+        cases = (
+            ("price + 0.01", {"silver_discounted_price_within_price"}),
+            ("discounted_price - 0.01", {"silver_discounted_price_within_price"}),
+            ("discounted_price + 0.01", {"silver_discounted_price_within_price"}),
+            ("-0.01", {"silver_discounted_price_within_price", "nonnegative_stg_products_discounted_price"}),
+            ("null", {"silver_discounted_price_within_price", "not_null_stg_products_discounted_price"}),
+        )
+        self.build()
+        for value, expected in cases:
+            with self.subTest(value=value):
+                self.connection.execute("drop table stg_products")
+                self.connection.execute("create table stg_products as " + self.model_sql("stg_products"))
+                self.connection.execute(f"update stg_products set discounted_price = {value} where product_id = 2")
+                self.assertTrue(expected <= self.failures())
 
     def test_single_positive_category_has_full_price_share(self):
         rows = [row for row in self.fixture_rows() if row[2] == "Furniture"]
@@ -268,7 +325,7 @@ class ProductsDbtTests(unittest.TestCase):
 
     def test_normalization_and_metadata_preservation(self):
         self.build([("001", "  Laptop  ", " eLECTRONICS ", "899.99", "file.csv", "batch-123", TIMESTAMP)])
-        self.assertEqual(self.connection.execute("select * from stg_products").fetchone(), (1, "Laptop", "Electronics", Decimal("899.99"), "file.csv", "batch-123", TIMESTAMP))
+        self.assertEqual(self.connection.execute("select * from stg_products").fetchone(), (1, "Laptop", "Electronics", Decimal("899.99"), "file.csv", "batch-123", TIMESTAMP, Decimal("809.99")))
         self.assertEqual(self.failures(), set())
 
     def test_invalid_rows_are_preserved_and_caught_by_data_tests(self):
